@@ -1,0 +1,149 @@
+---
+title: "Match Tax Records To Zillow API for Project 3"
+author: "Ryan McGovern"
+date: "6/27/2019"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("ZillowR")
+library("tidyverse")
+library("rvest")
+library("dplyr")
+library("DT")
+library("XML")
+library("rgl")
+library("GGally")
+library("MuMIn")
+library("knitr")
+library("Metrics")
+library("modelr")
+library("caret")
+library("e1071")
+library("tree")
+library("randomForest")
+library("gbm")
+library("rpart")
+library("readxl")
+set.seed(7)
+```
+The goal of this will be to take the tax assessment records and match them against the Zillow API to bring in the Zestimate value. This is branching off of what was built for project 2 to also bring in LAt/Long for mapping
+
+```{r ReadAddress, eval = FALSE, echo = FALSE}
+#read in the address data from the tax assessment records
+Holbrook_address <- read_excel("Holbrook_Assessors_07182019.xlsx")
+
+#calculate the variables that will be needed to send this into Zillow
+Holbrook_address_2 <- Holbrook_address %>% mutate(ADR = Location) %>% mutate(ZIP_CD = "02343") %>% select(ADR, ZIP_CD)
+
+#generate a sample of all of the addresses, we will oversample to adjust for ones that cant be found on zillow 
+# for testing Holbrook_address_3 <- head(Holbrook_address_2,10)
+Holbrook_address_3 <- Holbrook_address_2
+```
+
+```{r IfNullFunction, echo=FALSE}
+#this function will return the value if available, otherwise return NULL
+ifnull = function(vars){
+  if (is.null(vars)) {
+                        NA
+                    } else { 
+                    vars
+                    }
+}
+```
+
+
+
+```{r ZillowQueryFun, echo = FALSE}
+#the purpose of this function is to cycle thru our list of addresses and use it to
+#query zillow. Since the API allows one hit at a time we will loop thru our list.
+get.zillowdata = function(df, ADR, ZIP_CD){
+  
+  #this will iterate thru the list and collect info from zillow
+  results = do.call(rbind, lapply (1:nrow(df), function(i) {
+    z = tryCatch({
+      zdata = GetDeepSearchResults(address = df$ADR[i],
+              citystatezip = df$ZIP_CD[i], zws_id = "")
+      
+      #parse out the field
+      par_1 <-xmlToList(zdata$response[["results"]][["result"]])
+
+      #begin to parse the character parts
+      useCode <- ifnull(par_1$useCode)
+      taxAssessmentYear <- ifnull(par_1$taxAssessmentYear)
+      taxAssessment <- ifnull(par_1$taxAssessment)
+      yearBuilt <- ifnull(par_1$yearBuilt)
+                    
+      lotSizeSqFt <- ifnull(par_1$lotSizeSqFt)
+      finishedSqFt <- ifnull(par_1$finishedSqFt)
+      bathrooms <- ifnull(par_1$bathrooms)
+      bedrooms <- ifnull(par_1$bedrooms)
+  
+      #take the list output and extract elements
+      address <- unlist(par_1$address)
+        Location <-ifnull(address["street"])
+        Zipcode <-ifnull(address["zipcode"])
+        City <-ifnull(address["city"])
+        latitude <-ifnull(address["latitude"])
+        longitude <-ifnull(address["longitude"])
+        
+      zestimate_list <- unlist(par_1$zestimate)
+        zestimate <-ifnull(zestimate_list["amount.text"])
+
+        LRE <- unlist(par_1$localRealEstate)
+          RegionName <-ifnull(LRE["name"])
+          RegionType <-ifnull(LRE["type"])
+        
+    #combine these values into the record so that one row is one property
+    text <- data.frame(cbind(
+      Location, Zipcode, City, latitude, longitude, useCode, taxAssessmentYear, taxAssessment, yearBuilt, lotSizeSqFt, finishedSqFt, bathrooms, bedrooms, zestimate, RegionName, RegionType))
+
+  return(text)
+      },
+     error = function(cond) {
+      return(NA) #return value if error
+    },
+  
+   warning = function(cond) {
+      return(NA) # return value if warning
+    }
+  )      
+  }
+))}
+```
+
+```{r CallFun, eval = FALSE, echo = FALSE}
+#call the function to query zillow
+Zillow_pull <- get.zillowdata(Holbrook_address_3,ADR, ZIP_CD)
+
+#save this to a csv 
+write.csv(Zillow_pull, file = "Zillow_pull.csv")
+```
+
+```{r readCSV, echo = FALSE, include=FALSE}
+Zillow_pull2 <- read.csv("Zillow_pull.csv") %>% filter(RegionName=="Holbrook")
+
+#restrict the returned values to include only complete records for modeling
+Zillow_pull3 <- Zillow_pull2[complete.cases(Zillow_pull2), ]
+
+#restrict dataset to include only variables we want to incorporate from zillow
+#along with the primary key for merging
+Zillow_pull4 <- Zillow_pull3 %>% select(Location, Zipcode, latitude, longitude, zestimate) %>% mutate(Propcase_Location=Location)
+
+
+#merge this dataset from zillow with the initial dataset pulled from the web
+#Primary Keys will need to be the same case to match on
+Zillow_pull4$Location <- tolower(Zillow_pull4$Location)
+Holbrook_address$Location <- tolower(Holbrook_address$Location)
+
+## left join with the original raw data
+Shiny_Data <- left_join(Holbrook_address, Zillow_pull4, by = "Location")
+
+#reduce this to complete cases
+Shiny_Data2 <- Shiny_Data[complete.cases(Shiny_Data), ]
+
+#once this is complete this file will be written out and used for the shiny app
+write.csv(Shiny_Data2, file = "Shiny_Data.csv")
+```
